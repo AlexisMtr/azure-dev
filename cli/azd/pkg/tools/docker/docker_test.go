@@ -285,6 +285,107 @@ func Test_DockerBuildArgsMultiple(t *testing.T) {
 	require.Equal(t, mockedDockerImgId, result)
 }
 
+func Test_DockerBake(t *testing.T) {
+	ran := false
+	cwd := "."
+	bakeDefinition := "./docker-bake.hcl"
+	target := "final"
+	imageName := "IMAGE_NAME"
+	t.Run("NoError", func(t *testing.T) {
+		ran = false
+
+		mockContext := mocks.NewMockContext(context.Background())
+		docker := NewDocker(mockContext.CommandRunner)
+
+		mockContext.CommandRunner.When(func(args exec.RunArgs, command string) bool {
+			return strings.Contains(command, "docker buildx bake -f ./docker-bake.hcl")
+		}).RespondFn(func(args exec.RunArgs) (exec.RunResult, error) {
+			ran = true
+
+			// extract img id file arg. "--iidfile" and path args are expected always at the end
+			argsNoFile, value := args.Args[:len(args.Args)-2], args.Args[len(args.Args)-1]
+
+			require.Equal(t, "docker", args.Cmd)
+			require.Equal(t, cwd, args.Cwd)
+			require.Equal(t, []string{
+				"buildx",
+				"bake",
+				"-f", bakeDefinition,
+				"--set", fmt.Sprintf("%s.tags=%s", target, imageName),
+				target,
+			}, argsNoFile)
+
+			// create the file as expected
+			metadata := fmt.Sprintf("{\"%s\": {\"containerimage.digest\": \"%s\"}}", target, mockedDockerImgId)
+			err := os.WriteFile(value, []byte(metadata), 0600)
+			require.NoError(t, err)
+
+			return exec.RunResult{
+				Stdout:   mockedDockerImgId,
+				Stderr:   "",
+				ExitCode: 0,
+			}, nil
+		})
+
+		result, err := docker.Bake(context.Background(), bakeDefinition, cwd, target, imageName, nil)
+
+		require.Equal(t, true, ran)
+		require.Nil(t, err)
+		require.Equal(t, mockedDockerImgId, result)
+	})
+
+	t.Run("WithError", func(t *testing.T) {
+		ran := false
+		stdErr := "Error tagging DockerFile"
+		customErrorMessage := "example error message"
+		imageName := "IMAGE_NAME"
+
+		mockContext := mocks.NewMockContext(context.Background())
+		docker := NewDocker(mockContext.CommandRunner)
+
+		mockContext.CommandRunner.When(func(args exec.RunArgs, command string) bool {
+			return strings.Contains(command, "docker build")
+		}).RespondFn(func(args exec.RunArgs) (exec.RunResult, error) {
+			ran = true
+
+			// extract img id file arg. "--iidfile" and path args are expected always at the end
+			argsNoFile, value := args.Args[:len(args.Args)-2], args.Args[len(args.Args)-1]
+
+			require.Equal(t, "docker", args.Cmd)
+			require.Equal(t, cwd, args.Cwd)
+			require.Equal(t, []string{
+				"buildx",
+				"bake",
+				"-f", bakeDefinition,
+				"--set", fmt.Sprintf("%s.tags=%s", target, imageName),
+				target,
+			}, argsNoFile)
+
+			// create the file as expected
+			err := os.WriteFile(value, []byte(""), 0600)
+			require.NoError(t, err)
+
+			return exec.RunResult{
+				Stdout:   "",
+				Stderr:   stdErr,
+				ExitCode: 1,
+			}, errors.New(customErrorMessage)
+		})
+
+		result, err := docker.Bake(context.Background(), bakeDefinition, cwd, target, imageName, nil)
+
+		require.Equal(t, true, ran)
+		require.NotNil(t, err)
+		require.Equal(
+			t,
+			fmt.Sprintf("building image: %s", customErrorMessage),
+			err.Error(),
+		)
+		require.Equal(t, "", result)
+	})
+
+}
+
 func Test_DockerTag(t *testing.T) {
 	cwd := "."
 	imageName := "image-name"

@@ -185,6 +185,14 @@ services:
 		}, argsNoFile)
 
 		// create the file as expected
+		const bakeMetadata = `
+		{
+			"default": {
+				"containerimage.digest": "imageId",
+				"containerimage.conf.digest": "imageId"
+			}
+		}
+		`
 		err := os.WriteFile(value, []byte("imageId"), 0600)
 		require.NoError(t, err)
 
@@ -206,6 +214,130 @@ services:
 	service.Project.Path = temp
 	service.RelativePath = ""
 	err = os.WriteFile(filepath.Join(temp, "Dockerfile.dev"), []byte("FROM node:14"), 0600)
+	require.NoError(t, err)
+
+	done := make(chan bool)
+
+	internalFramework := NewNpmProject(npmCli, env)
+	status := ""
+
+	framework := NewDockerProject(
+		env,
+		docker,
+		NewContainerHelper(env, envManager, clock.NewMock(), nil, docker, cloud.AzurePublic()),
+		mockinput.NewMockConsole(),
+		mockContext.AlphaFeaturesManager,
+		mockContext.CommandRunner)
+	framework.SetSource(internalFramework)
+
+	buildTask := framework.Build(*mockContext.Context, service, nil)
+	go func() {
+		for value := range buildTask.Progress() {
+			status = value.Message
+		}
+		done <- true
+	}()
+
+	buildResult, err := buildTask.Await()
+	<-done
+
+	require.Equal(t, "imageId", buildResult.BuildOutputPath)
+	require.Nil(t, err)
+	require.Equal(t, "Building Docker image", status)
+	require.Equal(t, true, ran)
+}
+
+func TestBuilxBakeOptions(t *testing.T) {
+	const testProj = `
+name: test-proj
+metadata:
+  template: test-proj-template
+resourceGroup: rg-test
+services:
+  web:
+    project: src/web
+    language: js
+    host: containerapp
+    resourceName: test-containerapp-web
+    docker:
+      bake:
+        definition: docker-bake.hcl
+        target: default
+        useServiceContext: false
+`
+
+	env := environment.NewWithValues("test-env", nil)
+	env.SetSubscriptionId("sub")
+	mockContext := mocks.NewMockContext(context.Background())
+	envManager := &mockenv.MockEnvManager{}
+
+	mockarmresources.AddAzResourceListMock(
+		mockContext.HttpClient,
+		convert.RefOf("rg-test"),
+		[]*armresources.GenericResourceExpanded{
+			{
+				ID:       convert.RefOf("app-api-abc123"),
+				Name:     convert.RefOf("test-containerapp-web"),
+				Type:     convert.RefOf(string(infra.AzureResourceTypeContainerApp)),
+				Location: convert.RefOf("eastus2"),
+			},
+		})
+
+	ran := false
+
+	mockContext.CommandRunner.When(func(args exec.RunArgs, command string) bool {
+		return strings.Contains(command, "docker buildx bake")
+	}).RespondFn(func(args exec.RunArgs) (exec.RunResult, error) {
+		ran = true
+
+		// extract img id file arg. "--metadata-file" and path args are expected always at the end
+		argsNoFile, value := args.Args[:len(args.Args)-2], args.Args[len(args.Args)-1]
+
+		require.Equal(t, []string{
+			"buildx", "bake",
+			"-f", "docker-bake.hcl",
+			"--set", "default.tags=test-proj-web",
+			"default",
+		}, argsNoFile)
+
+		// create the file as expected
+		const bakeMetadata = `
+		{
+			"default": {
+				"containerimage.digest": "imageId",
+				"containerimage.conf.digest": "imageId"
+			}
+		}
+		`
+		err := os.WriteFile(value, []byte(bakeMetadata), 0600)
+		require.NoError(t, err)
+
+		return exec.RunResult{
+			Stdout:   "imageId",
+			Stderr:   "",
+			ExitCode: 0,
+		}, nil
+	})
+
+	npmCli := npm.NewNpmCli(mockContext.CommandRunner)
+	docker := docker.NewDocker(mockContext.CommandRunner)
+
+	projectConfig, err := Parse(*mockContext.Context, testProj)
+	require.NoError(t, err)
+
+	service := projectConfig.Services["web"]
+	temp := t.TempDir()
+	service.Project.Path = temp
+	service.RelativePath = ""
+
+	const dockerBake = `
+target "default" {
+  dockerfile-inline = "FROM node:14"
+}
+	`
+	errBake := os.WriteFile(filepath.Join(temp, "docker-bake.hcl"), []byte(dockerBake), 0600)
+	err = os.WriteFile(filepath.Join(temp, "Dockerfile"), []byte("FROM node:14"), 0600)
+	require.NoError(t, errBake)
 	require.NoError(t, err)
 
 	done := make(chan bool)

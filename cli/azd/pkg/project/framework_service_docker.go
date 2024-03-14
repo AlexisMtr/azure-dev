@@ -41,6 +41,13 @@ type DockerProjectOptions struct {
 	Image     osutil.ExpandableString `yaml:"image,omitempty"     json:"image,omitempty"`
 	Tag       osutil.ExpandableString `yaml:"tag,omitempty"       json:"tag,omitempty"`
 	BuildArgs []string                `yaml:"buildArgs,omitempty" json:"buildArgs,omitempty"`
+	Bake      BuildxBake              `yaml:"bake,omitempty"      json:"bake,omitempty"`
+}
+
+type BuildxBake struct {
+	Definition     string `yaml:"definition"        json:"definition"`
+	Target         string `yaml:"target"            json:"target"`
+	ServiceContext bool   `yaml:"useServiceContext" json:"useServiceContext" default:"false"`
 }
 
 type dockerBuildResult struct {
@@ -253,17 +260,35 @@ func (p *dockerProject) Build(
 					MaxLineCount: 8,
 					Title:        "Docker Output",
 				})
-			imageId, err := p.docker.Build(
-				ctx,
-				serviceConfig.Path(),
-				dockerOptions.Path,
-				dockerOptions.Platform,
-				dockerOptions.Target,
-				dockerOptions.Context,
-				imageName,
-				dockerOptions.BuildArgs,
-				previewerWriter,
-			)
+
+			imageId, err := "", nil
+			if dockerOptions.Bake.Definition != "" {
+				ctxFolder := serviceConfig.Project.Path
+				if dockerOptions.Bake.ServiceContext {
+					ctxFolder = serviceConfig.Path()
+				}
+
+				imageId, err = p.docker.Bake(
+					ctx,
+					dockerOptions.Bake.Definition,
+					ctxFolder,
+					dockerOptions.Bake.Target,
+					imageName,
+					previewerWriter,
+				)
+			} else {
+				imageId, err = p.docker.Build(
+					ctx,
+					serviceConfig.Path(),
+					dockerOptions.Path,
+					dockerOptions.Platform,
+					dockerOptions.Target,
+					dockerOptions.Context,
+					imageName,
+					dockerOptions.BuildArgs,
+					previewerWriter,
+				)
+			}
 			p.console.StopPreviewer(ctx, false)
 			if err != nil {
 				task.SetError(fmt.Errorf("building container: %s at %s: %w", serviceConfig.Name, dockerOptions.Context, err))

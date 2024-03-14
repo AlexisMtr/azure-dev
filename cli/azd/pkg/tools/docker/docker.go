@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -32,6 +33,14 @@ type Docker interface {
 		buildArgs []string,
 		buildProgress io.Writer,
 	) (string, error)
+	Bake(
+		ctx context.Context,
+		definition string,
+		cwd string,
+		target string,
+		tagName string,
+		buildProgress io.Writer,
+	) (string, error)
 	Tag(ctx context.Context, cwd string, imageName string, tag string) error
 	Push(ctx context.Context, cwd string, tag string) error
 	Pull(ctx context.Context, imageName string) error
@@ -46,6 +55,11 @@ func NewDocker(commandRunner exec.CommandRunner) Docker {
 
 type docker struct {
 	commandRunner exec.CommandRunner
+}
+
+type builxBakeMetadata struct {
+	Digest       string `json:"containerimage.digest"`
+	ConfigDigest string `json:"containerimage.config.digest,omitempty"`
 }
 
 func (d *docker) Login(ctx context.Context, loginServer string, username string, password string) error {
@@ -135,6 +149,67 @@ func (d *docker) Build(
 		return "", fmt.Errorf("building image: %w", err)
 	}
 	return strings.TrimSpace(string(imgId)), nil
+}
+
+func (d *docker) Bake(
+	ctx context.Context,
+	definition string,
+	cwd string,
+	target string,
+	tagName string,
+	buildProgress io.Writer,
+) (string, error) {
+
+	tmpFolder, err := os.MkdirTemp(os.TempDir(), "azd-docker-build")
+	defer func() {
+		// fail to remove tmp files is not so bad as the OS will delete it
+		// eventually
+		_ = os.RemoveAll(tmpFolder)
+	}()
+
+	if err != nil {
+		return "", fmt.Errorf("building image: %w", err)
+	}
+	imgIdFile := filepath.Join(tmpFolder, "img-metadata.json")
+
+	args := []string{
+		"buildx",
+		"bake",
+		"-f", definition,
+	}
+
+	if tagName != "" {
+		args = append(args, "--set", fmt.Sprintf("%s.tags=%s", target, tagName))
+	}
+
+	args = append(args, target)
+	args = append(args, "--metadata-file", imgIdFile)
+
+	// Build and produce output
+	runArgs := exec.NewRunArgs("docker", args...).WithCwd(cwd)
+
+	if buildProgress != nil {
+		// setting stderr and stdout both, as it's been noticed
+		// that docker log goes to stderr on macOS, but stdout on Ubuntu.
+		runArgs = runArgs.WithStdOut(buildProgress).WithStdErr(buildProgress)
+	}
+
+	_, err = d.commandRunner.Run(ctx, runArgs)
+	if err != nil {
+		return "", fmt.Errorf("building image: %w", err)
+	}
+
+	imgId, err := os.ReadFile(imgIdFile)
+	if err != nil {
+		return "", fmt.Errorf("building image: %w", err)
+	}
+
+	var metadata map[string]builxBakeMetadata
+	err = json.Unmarshal(imgId, &metadata)
+	if err != nil {
+		return "", fmt.Errorf("building image: %w", err)
+	}
+	return strings.TrimSpace(string(metadata[target].Digest)), nil
 }
 
 func (d *docker) Tag(ctx context.Context, cwd string, imageName string, tag string) error {
